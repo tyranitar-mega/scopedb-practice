@@ -92,6 +92,90 @@ cargo run
    LIMIT 10
    ```
 
+## Querying Ingested Data with ScopeDB CLI (`scope`)
+
+You can also inspect and query the ingested rows directly from your terminal using the official [ScopeDB CLI (`scope`)](https://www.scopedb.io/docs/developer/scopedb-cli).
+
+### 1. Install `scope`
+
+**Download a release archive** (for example, macOS Apple Silicon `v0.2.0`):
+
+```bash
+curl -LO https://github.com/scopedb/scopedb-cli/releases/download/v0.2.0/scope_0.2.0_darwin_arm64.tar.gz
+tar -xzf scope_0.2.0_darwin_arm64.tar.gz scope
+mkdir -p "$HOME/.local/bin"
+install -m 0755 scope "$HOME/.local/bin/scope"
+export PATH="$HOME/.local/bin:$PATH"
+scope version
+```
+
+*(For other platforms, see the [official release downloads](https://www.scopedb.io/docs/developer/scopedb-cli#download-a-release), or build from source with Go 1.27+: `go install github.com/scopedb/scopedb-cli/cmd/scope@v0.2.0`.)*
+
+### 2. Connect to Your Workspace
+
+`scope` supports two authentication methods (see [Connect the CLI](https://www.scopedb.io/docs/developer/scopedb-cli/connect) and [Automate CLI Commands](https://www.scopedb.io/docs/developer/scopedb-cli/automation)):
+
+- **Option A — Reuse Environment Variables**:
+  If `SCOPEDB_ENDPOINT` and `SCOPEDB_API_KEY` are already exported in your shell (for running this Rust project), `scope` uses them automatically without requiring a separate login:
+  ```bash
+  scope auth status
+  scope doctor
+  scope query 'SELECT 1 AS ready'
+  ```
+
+- **Option B — Interactive Browser / Device Login**:
+  If you prefer interactive login (`unset SCOPEDB_ENDPOINT SCOPEDB_API_KEY` first so environment variables do not override the login):
+  ```bash
+  scope auth login
+  # Or in SSH / headless environments:
+  # scope auth login --use-device-code --no-browser
+
+  scope workspace list
+  scope workspace use '<workspace-id-or-name>'
+  scope auth status
+  scope doctor
+  ```
+
+### 3. Run Queries with `scope query`
+
+Once connected, use `scope query` (see [Query Data with the CLI](https://www.scopedb.io/docs/developer/scopedb-cli/query)) to inspect the data written to your table:
+
+- **Query recent `checkout` events** (default `table` output format):
+  ```bash
+  scope query "
+  FROM scopedb.public.events
+  WHERE time >= NOW() - 'PT15m'::interval
+    AND service = 'checkout'
+  SELECT time, name, message, var['gateway']::string AS gateway
+  ORDER BY time DESC
+  LIMIT 10
+  "
+  ```
+
+- **Aggregate ingested events by service and event name**:
+  ```bash
+  scope query "
+  FROM scopedb.public.events
+  WHERE time >= NOW() - 'PT15m'::interval
+  GROUP BY service, name
+  AGGREGATE count() AS events
+  ORDER BY events DESC
+  "
+  ```
+
+- **Format output as `json`, `jsonl`, or `csv`**:
+  ```bash
+  scope query --format json "FROM scopedb.public.events ORDER BY time DESC LIMIT 10"
+  scope query --format jsonl "FROM scopedb.public.events ORDER BY time DESC LIMIT 10"
+  scope query --format csv "FROM scopedb.public.events ORDER BY time DESC LIMIT 10" > events.csv
+  ```
+
+- **Execute a query from a `.scopeql` file or `stdin`**:
+  ```bash
+  scope query -f query.scopeql --format json
+  scope query --format json < query.scopeql
+  ```
+
 ## Running Tests
 
 Run the end-to-end integration test suite (uses a local mock server, no external workspace credentials required):
