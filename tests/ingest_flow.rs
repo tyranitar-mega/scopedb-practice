@@ -12,16 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::PathBuf;
-use std::sync::Arc;
-
 use scopedb_client::StatementEstimatedProgress;
-use scopedb_client::Value;
 use scopedb_practice::Config;
-use scopedb_practice::DEFAULT_BACKUP_FILE;
-use scopedb_practice::DEFAULT_BULK_ROWS;
-use scopedb_practice::WritePath;
-use scopedb_practice::run;
 use scopedb_practice::run_bulk_import;
 use serde_json::Value as JsonValue;
 use serde_json::json;
@@ -29,14 +21,12 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
 
 #[derive(Debug, Clone)]
 struct RecordedRequest {
     method: String,
     path: String,
     authorization: Option<String>,
-    body: Vec<u8>,
 }
 
 async fn read_http_request(stream: &mut TcpStream) -> RecordedRequest {
@@ -82,7 +72,6 @@ async fn read_http_request(stream: &mut TcpStream) -> RecordedRequest {
         method,
         path,
         authorization,
-        body: buf[header_end..header_end + content_length].to_vec(),
     }
 }
 
@@ -99,152 +88,6 @@ async fn write_json_response(stream: &mut TcpStream, status: u16, body: &JsonVal
     stream.write_all(response.as_bytes()).await.unwrap();
     stream.write_all(&payload).await.unwrap();
     stream.flush().await.unwrap();
-}
-
-#[tokio::test]
-async fn end_to_end_ingest_and_append_workflow() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let recorded = Arc::new(Mutex::new(Vec::<RecordedRequest>::new()));
-    let recorded_server = Arc::clone(&recorded);
-
-    let server = tokio::spawn(async move {
-        let mut statement_seq = 0usize;
-        for _ in 0..5 {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let req = read_http_request(&mut socket).await;
-            recorded_server.lock().await.push(req.clone());
-
-            match (req.method.as_str(), req.path.as_str()) {
-                ("POST", "/v1/statements") => {
-                    let current = statement_seq;
-                    statement_seq += 1;
-                    let response = if current == 0 {
-                        json!({
-                            "statement_id": "00000000-0000-0000-0000-000000000001",
-                            "status": "finished",
-                            "created_at": "2026-10-26T06:00:00Z",
-                            "progress": StatementEstimatedProgress::default(),
-                            "result_set": {
-                                "metadata": {
-                                    "fields": [{ "name": "ready", "data_type": "int" }],
-                                    "num_rows": 1
-                                },
-                                "format": "json",
-                                "rows": [["1"]]
-                            }
-                        })
-                    } else if current == 1 {
-                        json!({
-                            "statement_id": "00000000-0000-0000-0000-000000000002",
-                            "status": "finished",
-                            "created_at": "2026-10-26T06:00:01Z",
-                            "progress": StatementEstimatedProgress::default(),
-                            "result_set": {
-                                "metadata": {
-                                    "fields": [],
-                                    "num_rows": 0
-                                },
-                                "format": "json",
-                                "rows": []
-                            }
-                        })
-                    } else {
-                        json!({
-                            "statement_id": "00000000-0000-0000-0000-000000000003",
-                            "status": "finished",
-                            "created_at": "2026-10-26T06:00:02Z",
-                            "progress": StatementEstimatedProgress::default(),
-                            "result_set": {
-                                "metadata": {
-                                    "fields": [
-                                        { "name": "time", "data_type": "timestamp" },
-                                        { "name": "name", "data_type": "string" },
-                                        { "name": "message", "data_type": "string" },
-                                        { "name": "gateway", "data_type": "string" }
-                                    ],
-                                    "num_rows": 1
-                                },
-                                "format": "json",
-                                "rows": [[
-                                    "2026-10-26T06:00:00Z",
-                                    "payment_failed",
-                                    "Credit card gateway timed out",
-                                    "credit_card"
-                                ]]
-                            }
-                        })
-                    };
-                    write_json_response(&mut socket, 200, &response).await;
-                }
-                ("POST", "/v1/ingest") => {
-                    write_json_response(&mut socket, 200, &json!({ "num_rows_inserted": 2 })).await;
-                }
-                (
-                    "POST",
-                    "/v1/catalog/databases/analytics/schemas/raw/tables/checkout_events/ingest",
-                ) => {
-                    write_json_response(
-                        &mut socket,
-                        200,
-                        &json!({ "status": "committed", "num_rows_inserted": 1 }),
-                    )
-                    .await;
-                }
-                (method, path) => panic!("unexpected request: {method} {path}"),
-            }
-        }
-    });
-
-    let config = Config {
-        endpoint: format!("http://{addr}"),
-        api_key: "test-secret-api-key".to_string(),
-        database: "analytics".to_string(),
-        schema: "raw".to_string(),
-        table: "checkout_events".to_string(),
-        write_path: WritePath::Both,
-        bulk_rows: DEFAULT_BULK_ROWS,
-        backup_file: PathBuf::from(DEFAULT_BACKUP_FILE),
-    };
-
-    let report = run(&config).await.unwrap();
-    server.await.unwrap();
-
-    assert_eq!(report.ingested_rows, Some(2));
-    assert_eq!(report.appended_rows, Some(1));
-    assert_eq!(report.queried_rows.len(), 1);
-    assert_eq!(
-        report.queried_rows[0]["name"],
-        Value::String("payment_failed".to_string())
-    );
-    assert_eq!(
-        report.queried_rows[0]["gateway"],
-        Value::String("credit_card".to_string())
-    );
-
-    let requests = recorded.lock().await;
-    assert_eq!(requests.len(), 5);
-    for req in requests.iter() {
-        assert_eq!(
-            req.authorization.as_deref(),
-            Some("Bearer test-secret-api-key")
-        );
-    }
-
-    let ingest_payload: JsonValue = serde_json::from_slice(&requests[2].body).unwrap();
-    assert_eq!(ingest_payload["data"]["format"], "json");
-    assert!(
-        ingest_payload["data"]["rows"]
-            .as_str()
-            .unwrap()
-            .contains("\"payment_failed\"")
-    );
-    assert!(
-        ingest_payload["statement"]
-            .as_str()
-            .unwrap()
-            .contains("INSERT INTO `analytics`.`raw`.`checkout_events`")
-    );
 }
 
 #[tokio::test]
@@ -320,7 +163,6 @@ async fn end_to_end_bulk_import_workflow() {
         database: "scopedb".to_string(),
         schema: "public".to_string(),
         table: "events".to_string(),
-        write_path: WritePath::Append,
         bulk_rows,
         backup_file: backup_path.clone(),
     };

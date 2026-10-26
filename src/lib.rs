@@ -14,56 +14,23 @@
 
 use std::env;
 use std::error::Error;
-use std::fmt;
 use std::fs::File;
 use std::io::BufWriter;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use scopedb_client::Client;
-use scopedb_client::ResultObject;
 use scopedb_client::Table;
-use scopedb_client::reqwest;
-use scopedb_client::reqwest::Url;
-use scopedb_client::reqwest::header::AUTHORIZATION;
-use scopedb_client::reqwest::header::CONTENT_TYPE;
-use scopedb_client::reqwest::header::HeaderValue;
-use serde::Deserialize;
-use serde::Serialize;
 use serde_json::Value as JsonValue;
 use serde_json::json;
 
 pub const DEFAULT_BULK_ROWS: usize = 10_000;
 pub const DEFAULT_BACKUP_FILE: &str = "events.ndjson";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WritePath {
-    Ingest,
-    Append,
-    #[default]
-    Both,
-}
-
-impl FromStr for WritePath {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "ingest" => Ok(Self::Ingest),
-            "append" => Ok(Self::Append),
-            "both" => Ok(Self::Both),
-            other => Err(format!(
-                "invalid SCOPEDB_WRITE_PATH '{other}'; expected 'ingest', 'append', or 'both'"
-            )),
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -72,7 +39,6 @@ pub struct Config {
     pub database: String,
     pub schema: String,
     pub table: String,
-    pub write_path: WritePath,
     pub bulk_rows: usize,
     pub backup_file: PathBuf,
 }
@@ -84,10 +50,6 @@ impl Config {
         let database = optional_env("SCOPEDB_DATABASE").unwrap_or_else(|| "scopedb".to_string());
         let schema = optional_env("SCOPEDB_SCHEMA").unwrap_or_else(|| "public".to_string());
         let table = optional_env("SCOPEDB_TABLE").unwrap_or_else(|| "events".to_string());
-        let write_path = match optional_env("SCOPEDB_WRITE_PATH") {
-            Some(val) => val.parse()?,
-            None => WritePath::default(),
-        };
         let bulk_rows = match optional_env("SCOPEDB_BULK_ROWS") {
             Some(val) => {
                 let parsed: usize = val.parse().map_err(|_| {
@@ -110,7 +72,6 @@ impl Config {
             database,
             schema,
             table,
-            write_path,
             bulk_rows,
             backup_file,
         })
@@ -128,13 +89,6 @@ fn optional_env(key: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct RunReport {
-    pub ingested_rows: Option<i64>,
-    pub appended_rows: Option<u64>,
-    pub queried_rows: Vec<ResultObject>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BulkImportReport {
     pub rows_generated: usize,
@@ -143,58 +97,10 @@ pub struct BulkImportReport {
     pub elapsed: Duration,
 }
 
-#[derive(Debug, Serialize)]
-struct IngestRequest {
-    data: IngestData,
-    statement: String,
-}
-
-#[derive(Debug, Serialize)]
-struct IngestData {
-    format: &'static str,
-    rows: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct IngestResponse {
-    num_rows_inserted: i64,
-}
-
-#[derive(Debug)]
-struct HttpIngestError {
-    status: reqwest::StatusCode,
-    body: String,
-}
-
-impl fmt::Display for HttpIngestError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "POST /v1/ingest failed with HTTP {}: {}",
-            self.status, self.body
-        )
-    }
-}
-
-impl Error for HttpIngestError {}
-
-fn build_clients(config: &Config) -> Result<(reqwest::Client, Client), Box<dyn Error>> {
-    // Redirects and transport-level retries are disabled so write requests are never replayed behind the caller's back.
-    let http_client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
-        .build()?;
-
+pub async fn run_bulk_import(config: &Config) -> Result<BulkImportReport, Box<dyn Error>> {
     let client = Client::builder(&config.endpoint)
         .api_key(&config.api_key)
-        .http_client(http_client.clone())
         .build()?;
-
-    Ok((http_client, client))
-}
-
-pub async fn run_bulk_import(config: &Config) -> Result<BulkImportReport, Box<dyn Error>> {
-    let (_, client) = build_clients(config)?;
 
     let ready = client.query("SELECT 1 AS ready").await?;
     let ready_rows = ready.into_objects()?;
@@ -253,53 +159,6 @@ pub async fn run_bulk_import(config: &Config) -> Result<BulkImportReport, Box<dy
         backup_file: config.backup_file.clone(),
         committed_rows: report.committed_rows,
         elapsed,
-    })
-}
-
-pub async fn run(config: &Config) -> Result<RunReport, Box<dyn Error>> {
-    let (http_client, client) = build_clients(config)?;
-
-    let ready = client.query("SELECT 1 AS ready").await?;
-    let ready_rows = ready.into_objects()?;
-    println!("Connected to ScopeDB (ready: {})", ready_rows[0]["ready"]);
-
-    let table = client
-        .table(&config.table)
-        .with_database(&config.database)
-        .with_schema(&config.schema);
-
-    prepare_destination_table(&client, &table).await?;
-    println!("Prepared destination table {}", table.identifier());
-
-    let ingested_rows = if matches!(config.write_path, WritePath::Ingest | WritePath::Both) {
-        let count = ingest_events_http(&http_client, config, &table, &sample_raw_events()).await?;
-        println!("Ingested rows via POST /v1/ingest: {count}");
-        Some(count)
-    } else {
-        None
-    };
-
-    let appended_rows = if matches!(config.write_path, WritePath::Append | WritePath::Both) {
-        let count = append_events_sdk(&table, &sample_shaped_events()).await?;
-        println!("Committed rows via SDK append_stream: {count}");
-        Some(count)
-    } else {
-        None
-    };
-
-    let queried_rows = query_recent_events(&client, &table).await?;
-    println!(
-        "Queried recent checkout events ({} rows):",
-        queried_rows.len()
-    );
-    for row in &queried_rows {
-        println!("  {row:?}");
-    }
-
-    Ok(RunReport {
-        ingested_rows,
-        appended_rows,
-        queried_rows,
     })
 }
 
@@ -435,7 +294,7 @@ impl SplitMix64 {
     }
 }
 
-pub async fn prepare_destination_table(
+async fn prepare_destination_table(
     client: &Client,
     table: &Table,
 ) -> Result<(), scopedb_client::Error> {
@@ -451,126 +310,4 @@ pub async fn prepare_destination_table(
     );
     client.query(statement).await?;
     Ok(())
-}
-
-pub async fn ingest_events_http(
-    http_client: &reqwest::Client,
-    config: &Config,
-    table: &Table,
-    events: &[JsonValue],
-) -> Result<i64, Box<dyn Error>> {
-    let rows = events
-        .iter()
-        .map(serde_json::to_string)
-        .collect::<Result<Vec<_>, _>>()?
-        .join("\n");
-
-    let statement = format!(
-        "SELECT
-            NOW() AS time,
-            $0['service']::string AS service,
-            $0['name']::string AS name,
-            $0['message']::string AS message,
-            $0::object AS var
-        WHERE service IS NOT NULL
-          AND name IS NOT NULL
-        INSERT INTO {}",
-        table.identifier()
-    );
-
-    let payload = IngestRequest {
-        data: IngestData {
-            format: "json",
-            rows,
-        },
-        statement,
-    };
-
-    let mut base_url = Url::parse(&config.endpoint)?;
-    if !base_url.path().ends_with('/') {
-        let path = format!("{}/", base_url.path());
-        base_url.set_path(&path);
-    }
-    let ingest_url = base_url.join("v1/ingest")?;
-
-    let mut auth_header = HeaderValue::from_str(&format!("Bearer {}", config.api_key))?;
-    auth_header.set_sensitive(true);
-
-    let response = http_client
-        .post(ingest_url)
-        .header(AUTHORIZATION, auth_header)
-        .header(CONTENT_TYPE, "application/json")
-        .json(&payload)
-        .send()
-        .await?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(Box::new(HttpIngestError { status, body }));
-    }
-
-    let result: IngestResponse = response.json().await?;
-    Ok(result.num_rows_inserted)
-}
-
-pub async fn append_events_sdk(
-    table: &Table,
-    events: &[JsonValue],
-) -> Result<u64, scopedb_client::Error> {
-    let stream = table.append_stream().build()?;
-    for event in events {
-        stream.send(event).await?;
-    }
-    let report = stream.shutdown().await?;
-    Ok(report.committed_rows)
-}
-
-pub async fn query_recent_events(
-    client: &Client,
-    table: &Table,
-) -> Result<Vec<ResultObject>, scopedb_client::Error> {
-    let query = format!(
-        "FROM {}
-        WHERE time >= NOW() - 'PT15m'::interval
-          AND service = 'checkout'
-        SELECT time, name, message, var['gateway']::string AS gateway
-        ORDER BY time DESC
-        LIMIT 10",
-        table.identifier()
-    );
-    let result = client.query(query).await?;
-    result.into_objects()
-}
-
-pub fn sample_raw_events() -> Vec<JsonValue> {
-    vec![
-        json!({
-            "service": "checkout",
-            "name": "payment_failed",
-            "message": "Credit card gateway timed out",
-            "gateway": "credit_card"
-        }),
-        json!({
-            "service": "checkout",
-            "name": "checkout_started",
-            "message": "User opened checkout",
-            "region": "apac",
-            "plan": "pro"
-        }),
-    ]
-}
-
-pub fn sample_shaped_events() -> Vec<JsonValue> {
-    let now = jiff::Timestamp::now().to_string();
-    vec![json!({
-        "time": now,
-        "service": "checkout",
-        "name": "payment_failed",
-        "message": "Credit card gateway timed out",
-        "var": {
-            "region": "apac",
-            "gateway": "credit_card"
-        }
-    })]
 }
