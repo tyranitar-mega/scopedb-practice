@@ -1,0 +1,9 @@
+FROM events AS e
+JOIN (
+    VALUES ('checkout', 'payments')
+    SELECT $0 AS name, $1 AS team
+) AS s ON e.service = s.name
+WHERE e.time >= NOW() - 'PT24h'::interval
+GROUP BY s.team, e.name
+AGGREGATE count() AS events
+ORDER BY events DESC

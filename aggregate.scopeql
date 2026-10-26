@@ -1,0 +1,5 @@
+FROM events
+WHERE time >= NOW() - 'PT15m'::interval
+GROUP BY service, name
+AGGREGATE count() AS events
+ORDER BY events DESC

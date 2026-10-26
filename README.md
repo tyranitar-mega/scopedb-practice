@@ -138,31 +138,54 @@ scope version
 
 ### 3. Run Queries with `scope query`
 
-The sample verification query is saved in [`query.scopeql`](./query.scopeql):
+Sample ScopeQL queries (see [Query Data](https://www.scopedb.io/docs/guides/query-events) and [Query Data with the CLI](https://www.scopedb.io/docs/developer/scopedb-cli/query)) are saved in local `.scopeql` files:
 
-```sql
-FROM scopedb.public.events
-WHERE time >= NOW() - 'PT15m'::interval
-  AND service = 'checkout'
-SELECT time, name, message, var['gateway']::string AS gateway
-ORDER BY time DESC
-LIMIT 10
-```
+- **[`query.scopeql`](./query.scopeql)** — Inspect recent `checkout` events:
+  ```sql
+  FROM scopedb.public.events
+  WHERE time >= NOW() - 'PT15m'::interval
+    AND service = 'checkout'
+  SELECT time, name, message, var['gateway']::string AS gateway
+  ORDER BY time DESC
+  LIMIT 10
+  ```
+- **[`aggregate.scopeql`](./aggregate.scopeql)** — Aggregate event counts by `service` and `name`:
+  ```sql
+  FROM events
+  WHERE time >= NOW() - 'PT15m'::interval
+  GROUP BY service, name
+  AGGREGATE count() AS events
+  ORDER BY events DESC
+  ```
+- **[`join.scopeql`](./join.scopeql)** — Join events with service ownership metadata and aggregate by `team` and `name`:
+  ```sql
+  FROM events AS e
+  JOIN (
+      VALUES ('checkout', 'payments')
+      SELECT $0 AS name, $1 AS team
+  ) AS s ON e.service = s.name
+  WHERE e.time >= NOW() - 'PT24h'::interval
+  GROUP BY s.team, e.name
+  AGGREGATE count() AS events
+  ORDER BY events DESC
+  ```
 
-*(If you customized `SCOPEDB_DATABASE`, `SCOPEDB_SCHEMA`, or `SCOPEDB_TABLE`, update the table identifier in `query.scopeql` accordingly.)*
+*(If you customized `SCOPEDB_DATABASE`, `SCOPEDB_SCHEMA`, or `SCOPEDB_TABLE`, update the table identifier in the `.scopeql` files accordingly.)*
 
-Once connected, execute the file with `scope query -f` (see [Query Data with the CLI](https://www.scopedb.io/docs/developer/scopedb-cli/query)):
+Once connected, execute any query file with `scope query -f`:
 
 - **Default `table` output format**:
   ```bash
   scope query -f query.scopeql
+  scope query -f aggregate.scopeql
+  scope query -f join.scopeql
   ```
 
 - **Format output as `json`, `jsonl`, or `csv`**:
   ```bash
   scope query -f query.scopeql --format json
-  scope query -f query.scopeql --format jsonl
-  scope query -f query.scopeql --format csv > events.csv
+  scope query -f aggregate.scopeql --format jsonl
+  scope query -f join.scopeql --format csv > events.csv
   ```
 
 ## Running Tests
