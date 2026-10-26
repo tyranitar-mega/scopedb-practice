@@ -18,7 +18,14 @@ use scopedb_practice::Config;
 use scopedb_practice::run_bulk_import;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() {
+    if let Err(err) = try_main().await {
+        eprintln!("Error: {err}");
+        std::process::exit(1);
+    }
+}
+
+async fn try_main() -> Result<(), Box<dyn Error>> {
     let config = Config::from_env_and_args()?;
     run_bulk_import(&config).await?;
     Ok(())

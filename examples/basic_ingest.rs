@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::env;
 use std::error::Error;
 use std::fmt;
-use std::str::FromStr;
 
+use clap::Parser;
+use clap::ValueEnum;
 use scopedb_client::Client;
 use scopedb_client::ResultObject;
 use scopedb_client::Table;
@@ -26,12 +26,13 @@ use scopedb_client::reqwest::header::AUTHORIZATION;
 use scopedb_client::reqwest::header::CONTENT_TYPE;
 use scopedb_client::reqwest::header::HeaderValue;
 use scopedb_practice::Config;
+use scopedb_practice::TableArgs;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use serde_json::json;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 enum WritePath {
     Ingest,
     Append,
@@ -39,41 +40,29 @@ enum WritePath {
     Both,
 }
 
-impl FromStr for WritePath {
-    type Err = String;
+#[derive(Debug, Clone, Parser)]
+#[command(
+    name = "basic_ingest",
+    about = "Run the basic ScopeDB ingestion and query example",
+    after_help = "Required environment variables:\n  SCOPEDB_ENDPOINT  HTTPS base URL of the ScopeDB workspace API\n  SCOPEDB_API_KEY   Bearer API key for the workspace"
+)]
+struct ExampleArgs {
+    #[command(flatten)]
+    target: TableArgs,
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "ingest" => Ok(Self::Ingest),
-            "append" => Ok(Self::Append),
-            "both" => Ok(Self::Both),
-            other => Err(format!(
-                "invalid --write-path '{other}'; expected 'ingest', 'append', or 'both'"
-            )),
-        }
-    }
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = WritePath::Both,
+        help = "Write path to execute"
+    )]
+    write_path: WritePath,
 }
 
 fn parse_example_args() -> Result<(Config, WritePath), Box<dyn Error>> {
-    let mut write_path = WritePath::default();
-    let mut forwarded = Vec::new();
-    let mut iter = env::args().skip(1);
-
-    while let Some(arg) = iter.next() {
-        if let Some(val) = arg.strip_prefix("--write-path=") {
-            write_path = val.parse()?;
-        } else if arg == "--write-path" {
-            let val = iter
-                .next()
-                .ok_or("missing value for argument '--write-path'")?;
-            write_path = val.parse()?;
-        } else {
-            forwarded.push(arg);
-        }
-    }
-
-    let config = Config::from_env_and_iter(forwarded)?;
-    Ok((config, write_path))
+    let args = ExampleArgs::parse();
+    let config = Config::from_env_and_table_args(args.target)?;
+    Ok((config, args.write_path))
 }
 
 #[derive(Debug, Serialize)]
@@ -112,7 +101,14 @@ impl fmt::Display for HttpIngestError {
 impl Error for HttpIngestError {}
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() {
+    if let Err(err) = try_main().await {
+        eprintln!("Error: {err}");
+        std::process::exit(1);
+    }
+}
+
+async fn try_main() -> Result<(), Box<dyn Error>> {
     let (config, write_path) = parse_example_args()?;
 
     // Redirects and transport-level retries are disabled so write requests are never replayed behind the caller's back.
