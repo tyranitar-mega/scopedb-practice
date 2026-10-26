@@ -29,30 +29,37 @@ All workspace-specific settings are configured via environment variables:
 | `SCOPEDB_DATABASE` | No | `scopedb` | Target database in your workspace. |
 | `SCOPEDB_SCHEMA` | No | `public` | Target schema in the database. |
 | `SCOPEDB_TABLE` | No | `events` | Destination table to create, ingest into, and query. |
-| `SCOPEDB_WRITE_PATH` | No | `both` | Write path to execute: `ingest` (`POST /v1/ingest` with ScopeQL transform), `append` (SDK `Table::append_stream`), or `both`. |
+| `SCOPEDB_BULK_ROWS` | No | `10000` | Number of random event rows (`N`) to generate and import in bulk mode (`cargo run`). |
+| `SCOPEDB_BACKUP_FILE` | No | `events.ndjson` | Local file path where the generated `N`-row NDJSON backup is saved before streaming. |
+| `SCOPEDB_WRITE_PATH` | No | `both` | Write path for the `basic_ingest` example: `ingest` (`POST /v1/ingest` with ScopeQL transform), `append` (SDK `Table::append_stream`), or `both`. |
 
 ## Usage
 
-1. Export the required environment variables in your shell:
+### 1. Bulk Import Mode (Default Binary)
+
+Generates `N` random events (where `string` columns `service`, `name`, and `message` can randomly be `null`, and `var` is a JSON object whose nested fields randomly contain arrays or JSON objects), saves them to a local NDJSON backup file, streams all rows via the SDK `Table::append_stream`, and prints the total elapsed time:
 
 ```bash
 export SCOPEDB_ENDPOINT="https://<your-workspace-endpoint>"
 export SCOPEDB_API_KEY="<your-api-key>"
-```
 
-*(Optional)* Override the target location or write path if needed:
+# Optional bulk import settings:
+export SCOPEDB_BULK_ROWS="10000"
+export SCOPEDB_BACKUP_FILE="events.ndjson"
 
-```bash
-export SCOPEDB_DATABASE="scopedb"
-export SCOPEDB_SCHEMA="public"
-export SCOPEDB_TABLE="events"
-export SCOPEDB_WRITE_PATH="both"
-```
-
-2. Run the ingestion workflow:
-
-```bash
 cargo run
+```
+
+### 2. Basic Ingestion Example (`examples/basic_ingest.rs`)
+
+Runs the step-by-step official guide workflow (connectivity check, table creation, `POST /v1/ingest` transform ingestion, SDK `append_stream`, and querying recent `checkout` events):
+
+```bash
+export SCOPEDB_ENDPOINT="https://<your-workspace-endpoint>"
+export SCOPEDB_API_KEY="<your-api-key>"
+export SCOPEDB_WRITE_PATH="both"
+
+cargo run --example basic_ingest
 ```
 
 ## What the Program Does

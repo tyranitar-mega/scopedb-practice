@@ -15,11 +15,11 @@
 use std::error::Error;
 
 use scopedb_practice::Config;
-use scopedb_practice::run;
+use scopedb_practice::run_bulk_import;
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let config = Config::from_env()?;
-    run(&config).await?;
+    run_bulk_import(&config).await?;
     Ok(())
 }

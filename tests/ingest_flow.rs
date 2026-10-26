@@ -12,13 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use scopedb_client::StatementEstimatedProgress;
 use scopedb_client::Value;
 use scopedb_practice::Config;
+use scopedb_practice::DEFAULT_BACKUP_FILE;
+use scopedb_practice::DEFAULT_BULK_ROWS;
 use scopedb_practice::WritePath;
 use scopedb_practice::run;
+use scopedb_practice::run_bulk_import;
 use serde_json::Value as JsonValue;
 use serde_json::json;
 use tokio::io::AsyncReadExt;
@@ -199,6 +203,8 @@ async fn end_to_end_ingest_and_append_workflow() {
         schema: "raw".to_string(),
         table: "checkout_events".to_string(),
         write_path: WritePath::Both,
+        bulk_rows: DEFAULT_BULK_ROWS,
+        backup_file: PathBuf::from(DEFAULT_BACKUP_FILE),
     };
 
     let report = run(&config).await.unwrap();
@@ -239,4 +245,130 @@ async fn end_to_end_ingest_and_append_workflow() {
             .unwrap()
             .contains("INSERT INTO `analytics`.`raw`.`checkout_events`")
     );
+}
+
+#[tokio::test]
+async fn end_to_end_bulk_import_workflow() {
+    let bulk_rows = 50usize;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let mut statement_seq = 0usize;
+        for _ in 0..3 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let req = read_http_request(&mut socket).await;
+            assert_eq!(req.authorization.as_deref(), Some("Bearer bulk-secret-key"));
+
+            match (req.method.as_str(), req.path.as_str()) {
+                ("POST", "/v1/statements") => {
+                    let current = statement_seq;
+                    statement_seq += 1;
+                    let response = if current == 0 {
+                        json!({
+                            "statement_id": "00000000-0000-0000-0000-000000000011",
+                            "status": "finished",
+                            "created_at": "2026-10-26T06:00:00Z",
+                            "progress": StatementEstimatedProgress::default(),
+                            "result_set": {
+                                "metadata": {
+                                    "fields": [{ "name": "ready", "data_type": "int" }],
+                                    "num_rows": 1
+                                },
+                                "format": "json",
+                                "rows": [["1"]]
+                            }
+                        })
+                    } else {
+                        json!({
+                            "statement_id": "00000000-0000-0000-0000-000000000012",
+                            "status": "finished",
+                            "created_at": "2026-10-26T06:00:01Z",
+                            "progress": StatementEstimatedProgress::default(),
+                            "result_set": {
+                                "metadata": {
+                                    "fields": [],
+                                    "num_rows": 0
+                                },
+                                "format": "json",
+                                "rows": []
+                            }
+                        })
+                    };
+                    write_json_response(&mut socket, 200, &response).await;
+                }
+                ("POST", "/v1/catalog/databases/scopedb/schemas/public/tables/events/ingest") => {
+                    write_json_response(
+                        &mut socket,
+                        200,
+                        &json!({ "status": "committed", "num_rows_inserted": bulk_rows }),
+                    )
+                    .await;
+                }
+                (method, path) => panic!("unexpected request: {method} {path}"),
+            }
+        }
+    });
+
+    let backup_path =
+        std::env::temp_dir().join(format!("scopedb_bulk_backup_{}.ndjson", std::process::id()));
+    let _ = std::fs::remove_file(&backup_path);
+
+    let config = Config {
+        endpoint: format!("http://{addr}"),
+        api_key: "bulk-secret-key".to_string(),
+        database: "scopedb".to_string(),
+        schema: "public".to_string(),
+        table: "events".to_string(),
+        write_path: WritePath::Append,
+        bulk_rows,
+        backup_file: backup_path.clone(),
+    };
+
+    let report = run_bulk_import(&config).await.unwrap();
+    server.await.unwrap();
+
+    assert_eq!(report.rows_generated, bulk_rows);
+    assert_eq!(report.committed_rows, bulk_rows as u64);
+    assert_eq!(report.backup_file, backup_path);
+
+    let content = std::fs::read_to_string(&backup_path).unwrap();
+    std::fs::remove_file(&backup_path).unwrap();
+
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(lines.len(), bulk_rows);
+
+    let mut saw_null_string_field = false;
+    let mut saw_non_null_string_field = false;
+    let mut saw_array_in_var = false;
+    let mut saw_object_in_var = false;
+
+    for line in lines {
+        let row: JsonValue = serde_json::from_str(line).unwrap();
+        assert!(row["time"].is_string());
+
+        for field in ["service", "name", "message"] {
+            if row[field].is_null() {
+                saw_null_string_field = true;
+            } else if row[field].is_string() {
+                saw_non_null_string_field = true;
+            } else {
+                panic!("unexpected type for {field}: {}", row[field]);
+            }
+        }
+
+        assert!(row["var"].is_object());
+        if row["var"]["payload"].is_array() {
+            saw_array_in_var = true;
+        } else if row["var"]["payload"].is_object() {
+            saw_object_in_var = true;
+        } else {
+            panic!("unexpected var.payload: {}", row["var"]["payload"]);
+        }
+    }
+
+    assert!(saw_null_string_field);
+    assert!(saw_non_null_string_field);
+    assert!(saw_array_in_var);
+    assert!(saw_object_in_var);
 }
