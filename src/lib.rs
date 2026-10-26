@@ -29,10 +29,16 @@ use scopedb_client::Table;
 use serde_json::Value as JsonValue;
 use serde_json::json;
 
+pub const DEFAULT_DATABASE: &str = "scopedb";
+pub const DEFAULT_SCHEMA: &str = "public";
+pub const DEFAULT_TABLE: &str = "events";
 pub const DEFAULT_BULK_ROWS: usize = 10_000;
 pub const DEFAULT_BACKUP_FILE: &str = "events.ndjson";
+pub const DEFAULT_BATCH_BYTES: usize = 4 * 1024 * 1024;
+pub const DEFAULT_MAX_BATCH_ROWS: usize = 200_000;
+pub const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub endpoint: String,
     pub api_key: String,
@@ -41,52 +47,164 @@ pub struct Config {
     pub table: String,
     pub bulk_rows: usize,
     pub backup_file: PathBuf,
+    pub batch_bytes: usize,
+    pub max_batch_rows: usize,
+    pub flush_interval: Duration,
 }
 
 impl Config {
-    pub fn from_env() -> Result<Self, Box<dyn Error>> {
+    pub fn from_env_and_args() -> Result<Self, Box<dyn Error>> {
+        Self::from_env_and_iter(env::args().skip(1))
+    }
+
+    pub fn from_env_and_iter<I, S>(args: I) -> Result<Self, Box<dyn Error>>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
         let endpoint = required_env("SCOPEDB_ENDPOINT")?;
         let api_key = required_env("SCOPEDB_API_KEY")?;
-        let database = optional_env("SCOPEDB_DATABASE").unwrap_or_else(|| "scopedb".to_string());
-        let schema = optional_env("SCOPEDB_SCHEMA").unwrap_or_else(|| "public".to_string());
-        let table = optional_env("SCOPEDB_TABLE").unwrap_or_else(|| "events".to_string());
-        let bulk_rows = match optional_env("SCOPEDB_BULK_ROWS") {
-            Some(val) => {
-                let parsed: usize = val.parse().map_err(|_| {
-                    format!("invalid SCOPEDB_BULK_ROWS '{val}'; expected a positive integer")
-                })?;
-                if parsed == 0 {
-                    return Err("SCOPEDB_BULK_ROWS must be greater than 0".into());
-                }
-                parsed
-            }
-            None => DEFAULT_BULK_ROWS,
-        };
-        let backup_file = optional_env("SCOPEDB_BACKUP_FILE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_BACKUP_FILE));
+        Self::from_credentials_and_iter(endpoint, api_key, args)
+    }
 
-        Ok(Self {
+    pub fn from_credentials_and_iter<I, S>(
+        endpoint: String,
+        api_key: String,
+        args: I,
+    ) -> Result<Self, Box<dyn Error>>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut config = Self {
             endpoint,
             api_key,
-            database,
-            schema,
-            table,
-            bulk_rows,
-            backup_file,
-        })
+            database: DEFAULT_DATABASE.to_string(),
+            schema: DEFAULT_SCHEMA.to_string(),
+            table: DEFAULT_TABLE.to_string(),
+            bulk_rows: DEFAULT_BULK_ROWS,
+            backup_file: PathBuf::from(DEFAULT_BACKUP_FILE),
+            batch_bytes: DEFAULT_BATCH_BYTES,
+            max_batch_rows: DEFAULT_MAX_BATCH_ROWS,
+            flush_interval: DEFAULT_FLUSH_INTERVAL,
+        };
+
+        let mut iter = args.into_iter().map(Into::into);
+        while let Some(arg) = iter.next() {
+            if arg == "--help" || arg == "-h" {
+                return Err(usage_text().into());
+            }
+            let (flag, inline_val) = match arg.split_once('=') {
+                Some((f, v)) => (f, Some(v.to_string())),
+                None => (arg.as_str(), None),
+            };
+            let mut next_val = || -> Result<String, Box<dyn Error>> {
+                if let Some(v) = inline_val.clone() {
+                    return Ok(v);
+                }
+                iter.next()
+                    .ok_or_else(|| format!("missing value for argument '{flag}'").into())
+            };
+
+            match flag {
+                "--database" => {
+                    config.database = non_empty_arg(flag, next_val()?)?;
+                }
+                "--schema" => {
+                    config.schema = non_empty_arg(flag, next_val()?)?;
+                }
+                "--table" => {
+                    config.table = non_empty_arg(flag, next_val()?)?;
+                }
+                "--bulk-rows" | "-n" => {
+                    config.bulk_rows = parse_positive_usize(flag, &next_val()?)?;
+                }
+                "--backup-file" => {
+                    config.backup_file = PathBuf::from(non_empty_arg(flag, next_val()?)?);
+                }
+                "--batch-bytes" => {
+                    config.batch_bytes = parse_positive_usize(flag, &next_val()?)?;
+                }
+                "--max-batch-rows" => {
+                    config.max_batch_rows = parse_positive_usize(flag, &next_val()?)?;
+                }
+                "--flush-interval" => {
+                    config.flush_interval = parse_duration(flag, &next_val()?)?;
+                }
+                other => {
+                    return Err(format!("unknown argument '{other}'\n\n{}", usage_text()).into());
+                }
+            }
+        }
+
+        Ok(config)
     }
 }
 
-fn required_env(key: &str) -> Result<String, String> {
-    optional_env(key).ok_or_else(|| format!("environment variable {key} is required"))
+fn usage_text() -> &'static str {
+    "Usage: scopedb-practice [OPTIONS]
+
+Required environment variables:
+  SCOPEDB_ENDPOINT              HTTPS base URL of the ScopeDB workspace API
+  SCOPEDB_API_KEY               Bearer API key for the workspace
+
+Optional arguments:
+  --database <NAME>             Target database name [default: scopedb]
+  --schema <NAME>               Target schema name [default: public]
+  --table <NAME>                Destination table name [default: events]
+  -n, --bulk-rows <N>           Number of random event rows to generate [default: 10000]
+  --backup-file <PATH>          Local NDJSON backup file path [default: events.ndjson]
+  --batch-bytes <BYTES>         Target NDJSON batch size in bytes [default: 4194304]
+  --max-batch-rows <ROWS>       Maximum rows per HTTP batch [default: 200000]
+  --flush-interval <DURATION>   Maximum flush delay, e.g. 500ms, 1s [default: 1s]"
 }
 
-fn optional_env(key: &str) -> Option<String> {
+fn non_empty_arg(flag: &str, value: String) -> Result<String, Box<dyn Error>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("argument '{flag}' must not be empty").into());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn parse_positive_usize(flag: &str, raw: &str) -> Result<usize, Box<dyn Error>> {
+    let parsed: usize = raw
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid {flag} '{raw}'; expected a positive integer"))?;
+    if parsed == 0 {
+        return Err(format!("{flag} must be greater than 0").into());
+    }
+    Ok(parsed)
+}
+
+fn parse_duration(flag: &str, raw: &str) -> Result<Duration, Box<dyn Error>> {
+    let trimmed = raw.trim();
+    if let Ok(millis) = trimmed.parse::<u64>() {
+        if millis == 0 {
+            return Err(format!("{flag} must be greater than 0").into());
+        }
+        return Ok(Duration::from_millis(millis));
+    }
+    let signed: jiff::SignedDuration = trimmed.parse().map_err(|_| {
+        format!(
+            "invalid {flag} '{raw}'; expected a duration such as '500ms', '1s', or milliseconds"
+        )
+    })?;
+    let duration =
+        Duration::try_from(signed).map_err(|_| format!("{flag} must be a positive duration"))?;
+    if duration.is_zero() {
+        return Err(format!("{flag} must be greater than 0").into());
+    }
+    Ok(duration)
+}
+
+pub fn required_env(key: &str) -> Result<String, String> {
     env::var(key)
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
+        .ok_or_else(|| format!("environment variable {key} is required"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,7 +245,12 @@ pub async fn run_bulk_import(config: &Config) -> Result<BulkImportReport, Box<dy
     );
 
     let start = Instant::now();
-    let stream = table.append_stream().build()?;
+    let stream = table
+        .append_stream()
+        .target_batch_bytes(config.batch_bytes)
+        .max_batch_rows(config.max_batch_rows)
+        .flush_interval(config.flush_interval)
+        .build()?;
     let admission_error = match stream.send_all(&events).await {
         Ok(admitted) => {
             println!(

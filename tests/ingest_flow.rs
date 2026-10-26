@@ -93,12 +93,14 @@ async fn write_json_response(stream: &mut TcpStream, status: u16, body: &JsonVal
 #[tokio::test]
 async fn end_to_end_bulk_import_workflow() {
     let bulk_rows = 50usize;
+    let max_batch_rows = 25usize;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
     let server = tokio::spawn(async move {
         let mut statement_seq = 0usize;
-        for _ in 0..3 {
+        let mut append_batches = 0usize;
+        for _ in 0..4 {
             let (mut socket, _) = listener.accept().await.unwrap();
             let req = read_http_request(&mut socket).await;
             assert_eq!(req.authorization.as_deref(), Some("Bearer bulk-secret-key"));
@@ -141,31 +143,47 @@ async fn end_to_end_bulk_import_workflow() {
                     write_json_response(&mut socket, 200, &response).await;
                 }
                 ("POST", "/v1/catalog/databases/scopedb/schemas/public/tables/events/ingest") => {
+                    append_batches += 1;
                     write_json_response(
                         &mut socket,
                         200,
-                        &json!({ "status": "committed", "num_rows_inserted": bulk_rows }),
+                        &json!({ "status": "committed", "num_rows_inserted": max_batch_rows }),
                     )
                     .await;
                 }
                 (method, path) => panic!("unexpected request: {method} {path}"),
             }
         }
+        assert_eq!(append_batches, 2);
     });
 
     let backup_path =
         std::env::temp_dir().join(format!("scopedb_bulk_backup_{}.ndjson", std::process::id()));
     let _ = std::fs::remove_file(&backup_path);
 
-    let config = Config {
-        endpoint: format!("http://{addr}"),
-        api_key: "bulk-secret-key".to_string(),
-        database: "scopedb".to_string(),
-        schema: "public".to_string(),
-        table: "events".to_string(),
-        bulk_rows,
-        backup_file: backup_path.clone(),
-    };
+    let config = Config::from_credentials_and_iter(
+        format!("http://{addr}"),
+        "bulk-secret-key".to_string(),
+        [
+            "--database",
+            "scopedb",
+            "--schema",
+            "public",
+            "--table",
+            "events",
+            "--bulk-rows",
+            &bulk_rows.to_string(),
+            "--backup-file",
+            backup_path.to_str().unwrap(),
+            "--max-batch-rows",
+            &max_batch_rows.to_string(),
+            "--flush-interval",
+            "250ms",
+            "--batch-bytes",
+            "65536",
+        ],
+    )
+    .unwrap();
 
     let report = run_bulk_import(&config).await.unwrap();
     server.await.unwrap();

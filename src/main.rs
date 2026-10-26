@@ -19,7 +19,7 @@ use scopedb_practice::run_bulk_import;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let config = Config::from_env()?;
+    let config = Config::from_env_and_args()?;
     run_bulk_import(&config).await?;
     Ok(())
 }

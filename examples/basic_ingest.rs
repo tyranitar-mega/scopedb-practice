@@ -48,23 +48,32 @@ impl FromStr for WritePath {
             "append" => Ok(Self::Append),
             "both" => Ok(Self::Both),
             other => Err(format!(
-                "invalid SCOPEDB_WRITE_PATH '{other}'; expected 'ingest', 'append', or 'both'"
+                "invalid --write-path '{other}'; expected 'ingest', 'append', or 'both'"
             )),
         }
     }
 }
 
-impl WritePath {
-    fn from_env() -> Result<Self, String> {
-        match env::var("SCOPEDB_WRITE_PATH")
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-        {
-            Some(val) => val.parse(),
-            None => Ok(Self::default()),
+fn parse_example_args() -> Result<(Config, WritePath), Box<dyn Error>> {
+    let mut write_path = WritePath::default();
+    let mut forwarded = Vec::new();
+    let mut iter = env::args().skip(1);
+
+    while let Some(arg) = iter.next() {
+        if let Some(val) = arg.strip_prefix("--write-path=") {
+            write_path = val.parse()?;
+        } else if arg == "--write-path" {
+            let val = iter
+                .next()
+                .ok_or("missing value for argument '--write-path'")?;
+            write_path = val.parse()?;
+        } else {
+            forwarded.push(arg);
         }
     }
+
+    let config = Config::from_env_and_iter(forwarded)?;
+    Ok((config, write_path))
 }
 
 #[derive(Debug, Serialize)]
@@ -104,8 +113,7 @@ impl Error for HttpIngestError {}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let config = Config::from_env()?;
-    let write_path = WritePath::from_env()?;
+    let (config, write_path) = parse_example_args()?;
 
     // Redirects and transport-level retries are disabled so write requests are never replayed behind the caller's back.
     let http_client = reqwest::Client::builder()

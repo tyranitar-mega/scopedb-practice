@@ -18,20 +18,32 @@ Before running the program, retrieve two values from your ScopeDB Console (see [
    - From **Connect**, choose **Manage keys** (or open **API Keys** for the workspace).
    - Create a new API key and copy the secret immediately.
 
-## Environment Variables
+## Configuration
 
-All workspace-specific settings are configured via environment variables:
+### 1. Required Environment Variables
 
-| Variable | Required | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `SCOPEDB_ENDPOINT` | **Yes** | — | HTTPS base URL of the ScopeDB API for your workspace (e.g., `https://<endpoint>`). |
-| `SCOPEDB_API_KEY` | **Yes** | — | Bearer API key secret created for your workspace. |
-| `SCOPEDB_DATABASE` | No | `scopedb` | Target database in your workspace. |
-| `SCOPEDB_SCHEMA` | No | `public` | Target schema in the database. |
-| `SCOPEDB_TABLE` | No | `events` | Destination table to create, ingest into, and query. |
-| `SCOPEDB_BULK_ROWS` | No | `10000` | Number of random event rows (`N`) to generate and import in bulk mode (`cargo run`). |
-| `SCOPEDB_BACKUP_FILE` | No | `events.ndjson` | Local file path where the generated `N`-row NDJSON backup is saved before streaming. |
-| `SCOPEDB_WRITE_PATH` | No | `both` | Write path for the `basic_ingest` example: `ingest` (`POST /v1/ingest` with ScopeQL transform), `append` (SDK `Table::append_stream`), or `both`. |
+Environment variables are used exclusively for required workspace credentials:
+
+| Variable | Required | Description |
+| :--- | :--- | :--- |
+| `SCOPEDB_ENDPOINT` | **Yes** | HTTPS base URL of the ScopeDB API for your workspace (e.g., `https://<endpoint>`). |
+| `SCOPEDB_API_KEY` | **Yes** | Bearer API key secret created for your workspace. |
+
+### 2. Optional Command-Line Arguments
+
+All optional settings are passed via command-line arguments:
+
+| Argument | Default | Description |
+| :--- | :--- | :--- |
+| `--database <NAME>` | `scopedb` | Target database in your workspace. |
+| `--schema <NAME>` | `public` | Target schema in the database. |
+| `--table <NAME>` | `events` | Destination table to create, ingest into, and query. |
+| `-n`, `--bulk-rows <N>` | `10000` | Number of random event rows (`N`) to generate and import in bulk mode (`cargo run`). |
+| `--backup-file <PATH>` | `events.ndjson` | Local file path where the generated `N`-row NDJSON backup is saved before streaming. |
+| `--batch-bytes <BYTES>` | `4194304` (4 MiB) | Target NDJSON payload size per batch (`AppendStreamBuilder::target_batch_bytes`). |
+| `--max-batch-rows <ROWS>` | `200000` | Maximum rows per HTTP batch (`AppendStreamBuilder::max_batch_rows`). |
+| `--flush-interval <DURATION>` | `1s` | Maximum delay before dispatching a buffered batch, e.g. `500ms`, `1s`, `2s` (`AppendStreamBuilder::flush_interval`). |
+| `--write-path <PATH>` | `both` | *(For `examples/basic_ingest.rs` only)* Write path to execute: `ingest`, `append`, or `both`. |
 
 ## Usage
 
@@ -43,11 +55,16 @@ Generates `N` random events (where `string` columns `service`, `name`, and `mess
 export SCOPEDB_ENDPOINT="https://<your-workspace-endpoint>"
 export SCOPEDB_API_KEY="<your-api-key>"
 
-# Optional bulk import settings:
-export SCOPEDB_BULK_ROWS="10000"
-export SCOPEDB_BACKUP_FILE="events.ndjson"
-
+# Run with defaults:
 cargo run
+
+# Or customize optional parameters via CLI arguments:
+cargo run -- \
+  --bulk-rows 50000 \
+  --backup-file events.ndjson \
+  --batch-bytes 1048576 \
+  --max-batch-rows 10000 \
+  --flush-interval 500ms
 ```
 
 ### 2. Basic Ingestion Example (`examples/basic_ingest.rs`)
@@ -57,9 +74,8 @@ Runs the step-by-step official guide workflow (connectivity check, table creatio
 ```bash
 export SCOPEDB_ENDPOINT="https://<your-workspace-endpoint>"
 export SCOPEDB_API_KEY="<your-api-key>"
-export SCOPEDB_WRITE_PATH="both"
 
-cargo run --example basic_ingest
+cargo run --example basic_ingest -- --write-path both
 ```
 
 ## What the Program Does
@@ -177,7 +193,7 @@ Sample ScopeQL queries (see [Query Data](https://www.scopedb.io/docs/guides/quer
   ORDER BY events DESC
   ```
 
-*(If you customized `SCOPEDB_DATABASE`, `SCOPEDB_SCHEMA`, or `SCOPEDB_TABLE`, update the table identifier in the `.scopeql` files accordingly.)*
+*(If you customized `--database`, `--schema`, or `--table`, update the table identifier in the `.scopeql` files accordingly.)*
 
 Once connected, execute any query file with `scope query -f`:
 
