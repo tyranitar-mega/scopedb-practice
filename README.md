@@ -138,42 +138,31 @@ scope version
 
 ### 3. Run Queries with `scope query`
 
-Once connected, use `scope query` (see [Query Data with the CLI](https://www.scopedb.io/docs/developer/scopedb-cli/query)) to inspect the data written to your table:
+The sample verification query is saved in [`query.scopeql`](./query.scopeql):
 
-- **Query recent `checkout` events** (default `table` output format):
-  ```bash
-  scope query "
-  FROM scopedb.public.events
-  WHERE time >= NOW() - 'PT15m'::interval
-    AND service = 'checkout'
-  SELECT time, name, message, var['gateway']::string AS gateway
-  ORDER BY time DESC
-  LIMIT 10
-  "
-  ```
+```sql
+FROM scopedb.public.events
+WHERE time >= NOW() - 'PT15m'::interval
+  AND service = 'checkout'
+SELECT time, name, message, var['gateway']::string AS gateway
+ORDER BY time DESC
+LIMIT 10
+```
 
-- **Aggregate ingested events by service and event name**:
+*(If you customized `SCOPEDB_DATABASE`, `SCOPEDB_SCHEMA`, or `SCOPEDB_TABLE`, update the table identifier in `query.scopeql` accordingly.)*
+
+Once connected, execute the file with `scope query -f` (see [Query Data with the CLI](https://www.scopedb.io/docs/developer/scopedb-cli/query)):
+
+- **Default `table` output format**:
   ```bash
-  scope query "
-  FROM scopedb.public.events
-  WHERE time >= NOW() - 'PT15m'::interval
-  GROUP BY service, name
-  AGGREGATE count() AS events
-  ORDER BY events DESC
-  "
+  scope query -f query.scopeql
   ```
 
 - **Format output as `json`, `jsonl`, or `csv`**:
   ```bash
-  scope query --format json "FROM scopedb.public.events ORDER BY time DESC LIMIT 10"
-  scope query --format jsonl "FROM scopedb.public.events ORDER BY time DESC LIMIT 10"
-  scope query --format csv "FROM scopedb.public.events ORDER BY time DESC LIMIT 10" > events.csv
-  ```
-
-- **Execute a query from a `.scopeql` file or `stdin`**:
-  ```bash
   scope query -f query.scopeql --format json
-  scope query --format json < query.scopeql
+  scope query -f query.scopeql --format jsonl
+  scope query -f query.scopeql --format csv > events.csv
   ```
 
 ## Running Tests

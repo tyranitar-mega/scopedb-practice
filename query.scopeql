@@ -1,0 +1,6 @@
+FROM scopedb.public.events
+WHERE time >= NOW() - 'PT15m'::interval
+  AND service = 'checkout'
+SELECT time, name, message, var['gateway']::string AS gateway
+ORDER BY time DESC
+LIMIT 10
